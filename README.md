@@ -339,7 +339,7 @@ index 53ce1dd..793bf2d 100644
 ## Glibc Internals
 
 I will not cover all of glibc internal here as it's quite a lot to cover. I will though go briefly over the relevant parts.
-I highly recommend having good knowledge about glibc internals before continuing into the exploitation part. 
+I highly recommend having some knowledge about glibc internals before continuing into the exploitation part. 
 Here are some relevant resources: 
 
 1. [glibc Internals for a quick overview of struct's](https://sourceware.org/glibc/wiki/MallocInternals)
@@ -347,6 +347,7 @@ Here are some relevant resources:
 3. [azeria-labs part 2 deep understanding](https://azeria-labs.com/heap-exploitation-part-2-glibc-heap-free-bins/)
 
 If one reads (and understands) these 3 front to back you prety much in my oppinion have alle the knowledge to get started in glibc heap exploitation, altough some parts has changed since. Unfortunately I am not aware of any source execpt [glibc source](https://github.com/bminor/glibc/) that is 100p uptodate.
+You can try and follow along and go back reading these if nothing makes sence, I will make exploitation very datiled.
 
 The heap can be seen as a collection of doubly and singly linked lists (oversimplified). 
 We have 5 kinds of linked list:
@@ -359,11 +360,11 @@ We have 5 kinds of linked list:
 
 These bins all have diffrent purposes and allows for speed optimization where seams fit. We prefer to consolidate two consecutive chunks of memory into one upon free'ing when the chunk is big and not when the chunk is small. A small waste of space by not consolidating small chunks is accepted to gain speed up. A rule of thumb is that if the list supports consolidation it's **doubly** linked allowing for quick removal in the middle of the list. **Singly** linked when consolidation will never happen because of the small size of chunks. Here tcache is the exception. I am positive this is described in the links above. 
 
-| ![mchunkptr](/imgs/mchunkptr.png) |
-|:--:|
-| <b>ptype of victim with breakpoint on line 3788 in malloc.c</b>|
+| ![mchunkptr](/imgs/mchunkptr.png)                                |
+|:----------------------------------------------------------------:|
+| <b>ptype of victim with breakpoint on line 3788 in `malloc.c`</b> |
 
-Above is the structure of a glibc chunk printed from a gdb breakpoint inside malloc.c:
+Above is the structure of a glibc chunk printed from a gdb breakpoint inside `malloc.c`:
 
 1. `prev_size`: the size of the previous chunk in memory **not in the linked list**
 2. `size`: size of the chunk. The last 3 bit's are flags (bit 0 is_previous_chunk_in_use important to us)
@@ -374,23 +375,23 @@ The rest is only relevant for large chunks and i won't go into details, also tca
 
 An important note here is that (with some exception's) `prev_size`and `size` is stored outside of the memory returned to the user while `fd` and `bk` is stored instead of user data. This is okay as `fd` and `bk` is only relvant when the buffer is already in a freed state . This also means that malloc will infact allocate 0x10 bytes more than the requested size to have space enough for `prev_size` and `size`. 
 
-In this challenge the only relevant part is actually the unsorted bin (potentilay largebins). As we are limited to do allocations of at least `0x500` meaning we are above both tchace, fast bin and small bin ranges. So this means that every time we free the chunk will end in the unsortedbin and like wise we will only be allocate from this bin as well.
+In this challenge the only relevant part is actually the unsorted bin (potentilay largebins). As we are limited to do allocations of at least 0x500 meaning we are above both tchace, fast bin and small bin ranges. So this means that every time we free the chunk will end in the unsortedbin and like wise we will only be allocate from this bin as well.
 
 When we free a chunk it is put first in unsortebin after consolidation. 
-consolidation (merged together into one chunk) happens if two chunks are consecutive in memory upon free.
+Consolidation (merged together into one chunk) happens if two chunks are consecutive in memory upon free.
 This also happens with the special chunk called the top chunk defining the end of currently in use heap area.
-When allocating we will scan the unsortedbin for an exact size match every chunk not fitting will be sorted into it apropiate bin in this binary it will always be largebins. Doing exploitation we will not encounter this. If no chunk is matched we will go over a number of steps trying to reallocate from the bins big enough for requested size and at last if everything else fails take from the top chunk. 
+When allocating libc will scan the unsortedbin for an exact size match and every chunk not fitting will be sorted into it's appropriate bin. In this binary it will always be largebins. Doing exploitation we will not encounter this. If no chunk is matched we will go over a number of steps trying to reallocate from the bins big enough for requested size and at last if everything else fails take from the top chunk. 
 
 ## Exploitation
 
 Goal: get shell using `__free_hook` to makes free call system with `/bin/sh\x00` in a buffer.
 
 Okay now let's exploit this shit, but where to start with a milion exploit strats on [How2Heap](https://github.com/shellphish/how2heap) and some of them even having wrong version annotation (ofc one can do overlapping chunks in libc above 2.29 it's just harder).
-Actually I recommend just learning glibc internal a few strat's along with some Heap feng shui and just yolo from there.
+Actually I recommend just learning glibc internal and some read some basic strat's along with some Heap feng shui and just yolo from there.
 
-After fucking around with the leak/printf for some hours I decided to do leak less heap exploitation, now were are not completely in the blind here as there is no PIE. So we know some addresses this made me quite certain that a special kinda unlink attack would work as I have done this many times before on binaries both with and especially without PIE. 
+After fucking around with the leak/printf for some hours I decided to do leak less heap exploitation. We are not completely in the blind here as there is no PIE. So we know some addresses, this made me quite certain that a special kinda unlink attack would work as I have done this many times before on binaries both with and especially without PIE. 
 
-The `replace block` we can only do once and is therefore a super valuable resource to us so we will keep this available as long as we can right until the end where we override the `__free_hook`. First what we wanna do is to get full control of the usortedbin we will do this by setting up the heap in a way where we can free a chunk we control all aspects of. 
+The `replace block` we can only do once and it is therefore a super valuable resource to us so we will keep this available as long as we can, right until the end where we override the `__free_hook`. First what we wanna do is to get full control of the usortedbin we will do this by setting up the heap in a way where we can control all aspects of a freed chunk 
 
 Let's first define some interaction functions:
 
@@ -414,13 +415,13 @@ def delete(idx: int, keep: bool = False) -> None:
 
 ### Setup Overlapping Chunks
 
-To execute a unlink attack we first wanna have full control of first chunk within the unsortedbin. To accomplish this we will first create overlapping chunks and later freeing a overlapped chunk.
+To execute a unlink attack we first wanna have full control of the first chunk within the unsortedbin. To accomplish this we will first create overlapping chunks and free the later chunk.
 
 | ![Overlapping Chunks](imgs/diag1.png) |
 |:--:|
 | <b>0x511 because we allocate 0x10 more and the previous in use bit is set</b>|
 
-We wanna setup our heap in such a way that we can free a fake chunk creating overlapping chunks. As we will se later this will allow us to control first and only free chunk in the unsortedbin. With the python script bellow we will setup chunks as seen in the picture above.
+We wanna setup our heap in such a way that we can free a fake chunk creating overlapping chunks. As we will se later this will allow us to control first and only freed chunk in the unsortedbin. With the python script bellow we will setup chunks as seen in the picture above.
 
 ``` python
 create(0, 0x500, b"A"*0x80)
@@ -461,7 +462,7 @@ We also change the chunk size to 0x600 so this chunk will now overlap the follow
 
 ![gdb output 2](imgs/gdb_out2.png)
 
-Whoops we happend to react `malloc_printerr` due to the `prev_inuse` check not passing. This is because that we now have expanded the chunk size and doing the consolidation phase checks the previous in use bit for the chunk we are trying to free. By inspecting +0x600 further we indeed see only zero's. luckily this es part of `mem[2]` memory so we can fix this.
+Whoops we happend to react `malloc_printerr` due to the `prev_inuse` check not passing. This is because we have expanded the chunk size and doing the consolidation phase checks the previous in use bit for the chunk we are trying to free. By inspecting +0x600 further we indeed see only zero's. This means the size of the next chunk is zero and the 0x600 chunk is not in use. It has to be in use otherwise libc will detect it as a double free. luckily this is a part of `mem[2]`'s memory so we can fix this.
 
 ``` python
 create(0, 0x500, b"A"*0x80)
@@ -481,7 +482,7 @@ create(0, 0xa10, flat({
 delete(1)
 ```
 
-By doing the above we in `create(2, ...)` we say that at offset 0xe8 into the buffer place a p64(0x21), meaning we place a small chunk of size 0x20 and set `previous_inuse`. This tells libc that the 0x600 is in fact in use and are allowed to be freed. Another problem will accrue as well. Namely that it will now check the next `previous_inuse` bit of the small 0x20 chunk checking if it can consolidate the thow chunks to one 0x621 chunk, but again finds zero's. So we repeart by putting another fake chunk with `previous_inuse` bit set telling the smaller chunk is also in use. This is done with the: `0xe8+0x20: p64(0x21)`. So to refere to our drawing from erlier we now have expanded size of `B` and created two fake chunks within the `green` chunk. Now `B` overlaps into `C` and we are acutally able to free both of them. Here is our diagram so far altough realy hard to draw overlapping chunks.
+By doing the above we in `create(2, ...)` we say that at offset 0xe8 into the buffer place a p64(0x21), meaning we place a small chunk of size 0x20 and set `previous_inuse`. This tells libc that the 0x600 is in fact in use and are allowed to be freed. Another problem will accrue as well. Namely that it will now check the next `previous_inuse` bit of the small 0x20 chunk checking if it can consolidate the thow chunks to one 0x621 chunk, but again finds zero's. So we repeat by putting another fake chunk with `previous_inuse` bit set, telling libc the smaller chunk is also in use. This is done with the: `0xe8+0x20: p64(0x21)`. So to refere to our drawing from erlier we now have expanded size of `B` and created two fake chunks within the `green` chunk. Now `B` overlaps into `C` and we are acutally able to free both of them. Here is our diagram so far altough realy hard to draw overlapping chunks.
 
 
 | ![Overlapping Chunks Diagram](imgs/diag2.png) |
@@ -521,11 +522,11 @@ let's once again draw a diagram:
 
 | ![Unsorted Control](imgs/diag3.png) |
 |:--:|
-| <b>`mem[0]` still points to a chunk `A` but is omited as it is not use full to us any more</b> </br> <b>Here is only forward pointers drawn.</b>|
+| <b>`mem[0]` still points to chunk `A` but is omited as it is not use full to us any more</b> </br> <b>Here is only forward pointers drawn.</b>|
 
 This drawing should some what reprecent what is going on in our exploit so fare. What we see is that we now have two chunks in unsortedbin. and we can allocate back both of them by alocating their exact size-0x10. Now that means if we allocate 0x5f0 we will get back chunk `B` which overlaps chunk `C`. Chunk `C` will still be first in unsorted list.
-Well the observant read might have noticed that in my explanation of glibc mentionend that we will sort the unsortedbins into other bins doing this phase. So shouldent we move chunk `C` to largebins when search for `B` as we would first iterate over `B`?
-Well actually no, lets look at the malloc implementation to se why malloc.c:3739:
+Well the observant read might have noticed that in my explanation of glibc mentionend that we will sort the unsortedbins into other bins doing this phase. So shouldn't we move chunk `C` to largebins when search for `B` as we would first iterate over `C`?
+Well actually no, lets look at the malloc implementation to see why `malloc.c:3739`:
 
 ``` c
   for (;; )
@@ -541,7 +542,7 @@ Well actually no, lets look at the malloc implementation to se why malloc.c:3739
           size = chunksize (victim);
 ```
 
-This is where we search the unsortedbins for a exact match in chunk size, and sort all other traversed chunks. `victim` is the chunk we will be checking and sorting and we can see that `victim` is taken from the back pointer `bk` and not the front, remember we have a doubly linked list. So we are actually traversing the linked list on the diagram in reversed order and 0x601 will be the first chunk visited.
+This is where we search the unsortedbins for a exact match in chunk size, and sort all other traversed chunks. `victim` is the chunk we will be checking and sorting. We can see that `victim` is taken from the back pointer `bk` and not the front, remember we have a doubly linked list. So we are actually traversing the linked list on the diagram in reversed order and 0x601 will be the first chunk visited.
 
 Here is a the code unlinking chunk and return `victim` back to our binary:
 
@@ -579,9 +580,10 @@ Here is a the code unlinking chunk and return `victim` back to our binary:
 #endif
             }
 ```
-Yes it looks messy and it is. But we see that no furter sorting will be done as we return `p` on line 3814 in malloc.c.
+Yes it looks messy and it is. But we see that no further sorting will be done as we return `p` on line 3814 in `malloc.c`.
 
-This means that we now completed the first goal we can allocate back 0x601 and get full control of the first and only chunk in the unsrotedbins which is prefect for doing unlink attack in unsortedbin:
+This means that we now completed the first goal:
+We can allocate back 0x601 and get full control of the first and only chunk in the unsrotedbins which is prefect for doing unlink attack in unsortedbin:
 
 ![gdb output 4](imgs/gdb_out4.png)
 
@@ -601,13 +603,13 @@ create(1, 0x5f0, flat({
 
 ### Unlink Attack 
 
-Now we will finaly go over the unlink attack and the mysterious `create(15, ...)`. The "original" [unlink attack](https://heap-exploitation.dhavalkapil.com/attacks/unlink_exploit) actually used the unlink path doing consolidation. We will be using the unlink preformed from malloc to pop the backward pointer `bk` from the main arena. I often find this path easier and as we will see more power full (in this situation).
+Now we will finaly go over the unlink attack and the mysterious `create(15, ...)`. The "original" [unlink attack](https://heap-exploitation.dhavalkapil.com/attacks/unlink_exploit) actually used the unlink path doing consolidation. We will be using the unlink preformed from malloc. Malloc pop's the backward pointer `bk` from the main arena. I often find this path easier and as we will see more power full (in this situation).
 
-Lets draw what the diagram once more to get an overview of what is going on:
+Lets draw the diagram after the last allocation in previous section to get an overview of what is going on:
 
 ![Diagram 4](imgs/diag4.png)
 
-now what we see here is that the `bk` pointer actually points to a some what valid chunk but inside our binary. As offset 0x8 is a size of 0x510 with the size 0x500. And as described erlier doing allocation from unsorted is drawn from the backward pointer.
+now what we see here is that the `bk` pointer actually points to a some what valid chunk but inside our binary, as offset 0x8 is a size of 0x511. This creates a chunk with size 0x510 and `prev_inuse` bit set. Keep in mind that doing allocation from unsorted we drawn from the backward pointer.
 
 let's have a look at this pointer in memory:
 
@@ -615,7 +617,7 @@ let's have a look at this pointer in memory:
 
 We can indeed se that the `mchunkptr` points to a chunk with a valid size and `prev_inuse` bit set, and it is inside the virtual address space of out binary.
 
-But something even more magic is going to happen when we pop this chunk from the unsorted bin let's try, `exploit.py` with pop:
+But something even more magic is going to happen when we pop this chunk from the unsorted bin let's try with following `exploit.py`:
 
 ``` python
 create(0, 0x500, b"A"*0x80)
@@ -646,12 +648,12 @@ create(1, 0x5f0, flat({
 create(2, 0x500, b"D"*0x80)
 ```
 
-lets have a look at gdb at this point in time, breaking just after the unlink has happend inside libc at malloc.c:3710.
-**Yes we end up with a libc pointer in `mem[0]` pointing into the `main arena`.** It actualy points right back at the unsortedbin.
+lets have a look at gdb at this point, breaking just after the unlink has happend inside libc at `malloc.c:3710`.
+**Yes we end up with a libc pointer in `mem[0]` pointing into the `main arena`.** It actually points right back at the unsortedbin.
 
 ![gdb output 6](imgs/gdb_out6.png)
 
-The unsortedbin is actually a noded it self in this doubly linked list. When we unlink the first element in the list we have to enure that the new first element in the list hash a `fd` pointing to the unsortedbins compeling the loop of nodes in the linked list.
+The unsortedbin is actually a node it self in this doubly linked list. When we unlink the first element in the list we have to ensure that the new first element in the list hash a `fd` pointing to the unsortedbins, completting the loop of nodes in the linked list.
 
 The code for unlinking can be found in `malloc.c:3788` and also shown in a snippet above. `unsorted_chunks (av)->bk = bck;` and `bck->fd = unsorted_chunks (av);`.
 
@@ -659,7 +661,8 @@ Now lets single step it. In the picture below we see the change inside the `main
 
 ![gdb output 7](imgs/gdb_out7.png)
 
-Now lets try and single step the next line. Now what we see is it will make the forward pointer of our next inline chunk on the unsortedbin point back in to libc's unsortedbin in an attempt to complete the loop. This is super advantages for us as we now have a libc pointer stored in our `mem[0]`.
+Now lets try and single step the next line. Now what we see is libc will make the forward pointer of our next inline chunk on the unsortedbin, point back in to libc's unsortedbin.
+This is done in an attempt to complete the loop for forward pointers. This is super advantages for us as we now have a libc pointer stored in our `mem[0]`.
 
 ![gdb output 8](imgs/gdb_out8.png)
 
@@ -669,14 +672,14 @@ Now again for a more visual overview let's draw a diagram showing this malloc tr
 |:--:|
 | <b>The heap chunk doesn't realy mater any more</b>|
 
-As we take from the backward pointer in unsortedbins we can now allocate the `mem` array. Now what we wanna do is allocate it and only overwrite 2 bytes. That will result in overwriting two least significant bytes of `mem[0]` and now we can redirect it to somewhere else in libc.
+As we take from the backward pointer in unsortedbins we can now allocate the `mem` array. Now what we wanna do is allocate it and only overwrite 2 bytes. That will result in overwriting the two least significant bytes of `mem[0]` and now we can redirect it to somewhere else in libc.
 
 ``` python
 free_hook = libc.symbols['__free_hook'] & 0xffff
 create(3, 0x500, p16(free_hook))
 ```
 
-Remember ALSR do not affect the 3 last nibbles of an address so for any libc address `p` it will hold that `p & 0xfff` will always stay the same. But we are overwriting two bytes so there is only a 1/16 chance this will work. But fuck it we will run the exploit a couple times.
+Remember ALSR do not affect the 3 last nibbles of an address. So for any libc address `p` it will hold that `p & 0xfff` will always stay the same. But we are overwriting two bytes so there is a 1/16 chance this will work. But fuck it we will run the exploit a couple times.
 
 yet another drawing:
 
@@ -684,11 +687,11 @@ yet another drawing:
 |:--:|
 | <b>They are marked blue as we actually control the content, so they can be considered in use but not important to us. </b>|
 
-So as we also can confirm by gdb we now have `__free_hook` at our disposal in the `mem[0]`. And if you recale we can replace one block and have not used that function yet.
+So as we also can confirm by gdb we now have `__free_hook` at our disposal in the `mem[0]`. And if you recale we can replace one block and have still not used that function.
 
 ![gdb output 9](imgs/gdb_out9.png)
 
-Now from here it a easy win we just replace the content of the `__free_hook` with `system`. You might ask who who where do we get system from?? 
+Now from here it a easy win we just replace the content of the `__free_hook` with `system`. You might ask where do we get system from?? 
 This is the top of the decompilation:
 
 ``` c
@@ -699,7 +702,7 @@ setvbuf(stdin, 0LL, 2, 0LL);
 puts("It's Minecraft time! Your speedrun starts... now!");
 ```
 
-So system is in our plt and we and again with no PIE whe can just point `__free_hook` at that one. Here is the final exploit code:
+So system is in our plt and we gain with no PIE we can just point `__free_hook` at that plt system. Here is the final exploit code:
 
 ```python
 create(0, 0x500, b"A"*0x80)
@@ -745,9 +748,15 @@ io.close()
 
 ## Discussion
 
-But first (I promise last gdb screenshot!) lets them system call:
+But first (I promise last gdb screenshot!) lets see the system call:
 
 ![gdb output 10](imgs/gdb_out10.png)
 
-So first feel free to use github issues as a way of communication or directly DM me in discord (zanderdk#1701). This challenge had some func ascpects and the minecraft made me feel that it not another note challenge and overall a good heap chall. Hope that my write-up was clear, i have put a lot of time in it. The exploit here is works 1/16 of the time, so we just run it a couple times and shell pop's at some point. I will be releasing a part 2 where we will make the exploit 100p stable and stil restricting us from using the printf as well as the system plt. But these write-up's stakes time do to so please be patient. I will ofc post link here as well as in the discord.
+So first feel free to use github issues as a way of communication or directly DM me in discord (zanderdk#1701). This challenge had some func ascpects and the minecraft theme made me feel that its not another note challenge, and overall a good heap chall. Hope that my write-up was clear, i have put a lot of time in it. 
+
+The exploit here only works 1/16 of the time, so we just run it a couple times and shell pop's at some point. 
+
+I will be releasing a part 2 where we will make the exploit 100p stable and still restricting us from using the printf as well as the system plt. But these write-up's stakes time do to so please be patient. I will ofc post link here as well as in the discord.
+
+Im also considering doing part 3 enabling PIE with same restrictions, but lets see when part two is out there.
 
